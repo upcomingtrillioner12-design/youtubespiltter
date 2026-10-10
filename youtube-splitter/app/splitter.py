@@ -1,26 +1,20 @@
-"""Core logic: YouTube metadata, download, and ffmpeg-based splitting."""
-import json
+"""Core logic: YouTube metadata (via API), download, and ffmpeg splitting."""
+import os
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
+import httpx
 from fastapi import HTTPException
 
 YOUTUBE_RE = re.compile(r"(youtube\.com/(watch|shorts|embed)|youtu\.be/)")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
-# FIX 1: Shared yt-dlp extraction args to bypass YouTube's cloud-IP block.
-# The 'web' client is blocked on Render/datacenter IPs; 'tv' and 'mweb' often work.
-YTDLP_EXTRACTOR_ARGS = {
-    "youtube": {
-        "player_client": ["tv", "mweb"],
-    }
-}
-
-# FIX 2: Common yt-dlp flags used in every invocation.
+# yt-dlp flags for the download step
 YTDLP_BASE_FLAGS = [
     "--no-playlist",
     "--no-warnings",
-    # Pretend to be a normal browser; helps with some 403s.
     "--user-agent",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -34,7 +28,71 @@ def validate_url(url: str) -> str:
     return url
 
 
-def _run(cmd: list[str], progress_cb=None, line_cb=None) -> None:
+def _extract_video_id(url: str) -> str:
+    if "youtu.be/" in url:
+        return url.split("youtu.be/")[-1].split("?")[0].split("&")[0]
+    parsed = urlparse(url)
+    if parsed.hostname and "youtube.com" in parsed.hostname:
+        qs = parse_qs(parsed.query)
+        if "v" in qs:
+            return qs["v"][0]
+        parts = [p for p in parsed.path.split("/") if p]
+        if parts and parts[0] in ("shorts", "embed") and len(parts) > 1:
+            return parts[1]
+    raise HTTPException(status_code=400, detail="Could not extract video ID from URL.")
+
+
+def _parse_iso_duration(s: str) -> int:
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", s or "")
+    if not m:
+        return 0
+    return int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3) or 0)
+
+
+def analyze(url: str) -> dict:
+    """Return title, duration, thumbnail, uploader using the official YouTube API."""
+    url = validate_url(url)
+    if not YOUTUBE_API_KEY:
+        raise HTTPException(status_code=500, detail="YouTube API key not configured on server.")
+
+    video_id = _extract_video_id(url)
+
+    api_url = "https://www.googleapis.com/youtube/v3/videos"
+    params = {
+        "part": "snippet,contentDetails,statistics",
+        "id": video_id,
+        "key": YOUTUBE_API_KEY,
+    }
+
+    try:
+        r = httpx.get(api_url, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=422, detail=f"YouTube API error: {e.response.text[:300]}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch video info: {e}")
+
+    if not data.get("items"):
+        raise HTTPException(status_code=404, detail="Video not found or unavailable.")
+
+    item = data["items"][0]
+    snippet = item.get("snippet", {})
+    content = item.get("contentDetails", {})
+    stats = item.get("statistics", {})
+
+    return {
+        "id": item.get("id"),
+        "title": snippet.get("title"),
+        "duration": _parse_iso_duration(content.get("duration", "")),
+        "uploader": snippet.get("channelTitle"),
+        "thumbnail": (snippet.get("thumbnails", {}).get("high")
+                      or snippet.get("thumbnails", {}).get("default", {})).get("url"),
+        "view_count": int(stats.get("viewCount", 0) or 0),
+    }
+
+
+def _run(cmd, progress_cb=None, line_cb=None):
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
@@ -44,60 +102,25 @@ def _run(cmd: list[str], progress_cb=None, line_cb=None) -> None:
         if line_cb and "[download]" in line and "%" in line:
             try:
                 pct = float(line.split("%")[0].split()[-1])
-                progress_cb(pct) if progress_cb else None
+                if progress_cb:
+                    progress_cb(pct)
             except (ValueError, IndexError):
                 pass
-        line_cb and line_cb(line)
+        if line_cb:
+            line_cb(line)
     proc.wait()
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(cmd[:3])}...")
 
 
-def analyze(url: str) -> dict:
-    """Return title, duration, thumbnail, uploader without downloading."""
-    url = validate_url(url)
-    # FIX 3: Pass extractor_args as JSON so yt-dlp uses the 'tv'/'mweb' client.
-    cmd = [
-        "yt-dlp",
-        "--dump-single-json",
-        "--extractor-args",
-        f"youtube:player_client={','.join(YTDLP_EXTRACTOR_ARGS['youtube']['player_client'])}",
-        *YTDLP_BASE_FLAGS,
-        url,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if proc.returncode != 0:
-        # FIX 4: Give a clearer error message so you know it's a YouTube-side block.
-        err = proc.stderr.strip()[-500:]
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Could not read video info. YouTube is blocking this server's IP. "
-                "Try again, or use a residential proxy. Details: " + err
-            ),
-        )
-    info = json.loads(proc.stdout)
-    return {
-        "id": info.get("id"),
-        "title": info.get("title"),
-        "duration": info.get("duration"),
-        "uploader": info.get("uploader") or info.get("channel"),
-        "thumbnail": info.get("thumbnail"),
-        "view_count": info.get("view_count"),
-    }
-
-
 def download(url: str, out_dir: Path, progress_cb=None) -> Path:
-    """Download best mp4 mux into out_dir, return the file path."""
+    """Download best mp4 into out_dir using yt-dlp."""
     out_dir.mkdir(parents=True, exist_ok=True)
     template = str(out_dir / "source.%(ext)s")
-    # FIX 5: Add extractor-args and base flags here too, since download also hits YouTube.
     cmd = [
         "yt-dlp",
         "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "--merge-output-format", "mp4",
-        "--extractor-args",
-        f"youtube:player_client={','.join(YTDLP_EXTRACTOR_ARGS['youtube']['player_client'])}",
         *YTDLP_BASE_FLAGS,
         "-o", template,
         url,
@@ -109,19 +132,12 @@ def download(url: str, out_dir: Path, progress_cb=None) -> Path:
     return vids[0]
 
 
-def split(video: Path, out_dir: Path, seconds: int, accurate: bool,
-          progress_cb=None) -> list[Path]:
-    """
-    Split `video` into chunks of `seconds`.
-    accurate=False -> stream copy (fast, snaps to keyframes).
-    accurate=True  -> re-encode (slower, frame-exact boundaries).
-    """
+def split(video: Path, out_dir: Path, seconds: int, accurate: bool, progress_cb=None):
     seconds = max(1, min(seconds, 3600))
     clips_dir = out_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
     pattern = str(clips_dir / "clip_%03d.mp4")
 
-    # total duration for progress estimation
     probe = subprocess.run(
         ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
          "-of", "csv=p=0", str(video)],
@@ -142,6 +158,7 @@ def split(video: Path, out_dir: Path, seconds: int, accurate: bool,
     cmd += [pattern]
 
     state = {"last": -1}
+
     def line_cb(line: str) -> None:
         m = re.search(r"time=(\d+):(\d+):([\d.]+)", line)
         if m and total and progress_cb:
