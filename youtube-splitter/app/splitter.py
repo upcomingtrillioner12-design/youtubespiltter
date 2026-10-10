@@ -1,7 +1,9 @@
 """Core logic: YouTube metadata (via API), download, and ffmpeg splitting."""
+import base64
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -11,13 +13,31 @@ from fastapi import HTTPException
 YOUTUBE_RE = re.compile(r"(youtube\.com/(watch|shorts|embed)|youtu\.be/)")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
-# yt-dlp flags for the download step
+# --- Optional cookies (set YT_COOKIES_B64 on Render) ---
+COOKIE_FILE_PATH = None
+_cookies_b64 = os.getenv("YT_COOKIES_B64")
+if _cookies_b64:
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".txt") as f:
+            f.write(base64.b64decode(_cookies_b64))
+            COOKIE_FILE_PATH = f.name
+    except Exception as e:
+        print(f"[warn] Failed to decode YT_COOKIES_B64: {e}")
+
+COOKIE_ARGS = ["--cookies", COOKIE_FILE_PATH] if COOKIE_FILE_PATH else []
+
+# --- yt-dlp flags (download step only) ---
 YTDLP_BASE_FLAGS = [
     "--no-playlist",
     "--no-warnings",
+    # Point the PO-token provider at Chromium inside the container
+    "--extractor-args", "youtubepot-wpc:browser_path=/usr/bin/chromium",
+    # Prefer clients that tend to work on datacenter IPs
+    "--extractor-args", "youtube:player_client=mweb,tv,web_safari",
     "--user-agent",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    *COOKIE_ARGS,
 ]
 
 
@@ -50,22 +70,23 @@ def _parse_iso_duration(s: str) -> int:
 
 
 def analyze(url: str) -> dict:
-    """Return title, duration, thumbnail, uploader using the official YouTube API."""
+    """Return metadata using the official YouTube Data API."""
     url = validate_url(url)
     if not YOUTUBE_API_KEY:
         raise HTTPException(status_code=500, detail="YouTube API key not configured on server.")
 
     video_id = _extract_video_id(url)
 
-    api_url = "https://www.googleapis.com/youtube/v3/videos"
-    params = {
-        "part": "snippet,contentDetails,statistics",
-        "id": video_id,
-        "key": YOUTUBE_API_KEY,
-    }
-
     try:
-        r = httpx.get(api_url, params=params, timeout=30)
+        r = httpx.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={
+                "part": "snippet,contentDetails,statistics",
+                "id": video_id,
+                "key": YOUTUBE_API_KEY,
+            },
+            timeout=30,
+        )
         r.raise_for_status()
         data = r.json()
     except httpx.HTTPStatusError as e:
