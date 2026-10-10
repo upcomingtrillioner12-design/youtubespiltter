@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClipSplitter — YouTube to Shorts</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="hero">
+    <div class="logo">✂ <span>Clip</span>Splitter</div>
+    <p class="tagline">Turn any YouTube video into ready-to-post short clips.</p>
+  </header>
+
+  <!-- STEP 1 : link -->
+  <section class="card" id="step-link">
+    <h2><span class="step-num">1</span> Paste the YouTube link</h2>
+    <div class="url-row">
+      <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=…  or  https://youtu.be/…" />
+      <button id="analyze-btn" class="btn primary">Fetch video</button>
+    </div>
+    <p class="hint" id="analyze-hint">Works with regular videos, Shorts and youtu.be links.</p>
+
+    <div id="video-info" class="video-info hidden">
+      <img id="thumb" alt="thumbnail"/>
+      <div class="meta">
+        <h3 id="v-title"></h3>
+        <p id="v-sub"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- STEP 2 : options -->
+  <section class="card hidden" id="step-options">
+    <h2><span class="step-num">2</span> Choose clip length</h2>
+    <div class="presets" id="presets">
+      <button class="preset" data-sec="15">15 <small>sec</small></button>
+      <button class="preset selected" data-sec="30">30 <small>sec</small></button>
+      <button class="preset" data-sec="60">60 <small>sec</small></button>
+      <button class="preset" data-sec="custom">Custom</button>
+    </div>
+    <div class="custom-row hidden" id="custom-row">
+      <input id="custom-sec" type="number" min="1" max="3600" value="45"/> <span>seconds each</span>
+    </div>
+
+    <label class="accurate">
+      <input type="checkbox" id="accurate"/>
+      Frame-exact cuts (re-encodes — slower, but boundaries land exactly on the chosen length)
+    </label>
+
+    <div class="estimate" id="estimate"></div>
+
+    <button id="split-btn" class="btn primary big">✂ Split into clips</button>
+  </section>
+
+  <!-- STEP 3 : progress -->
+  <section class="card hidden" id="step-progress">
+    <h2><span class="step-num">3</span> Processing</h2>
+    <div class="progress-wrap">
+      <div class="bar"><div class="fill" id="fill"></div></div>
+      <p id="status-msg">Starting…</p>
+    </div>
+    <div id="clips" class="clips"></div>
+    <div id="download-all" class="hidden">
+      <a id="zip-link" class="btn success big" href="#">⬇ Download all clips (.zip)</a>
+    </div>
+    <button id="new-job" class="btn ghost hidden">↺ Split another video</button>
+  </section>
+
+  <footer class="foot">
+    <p>Only split content you own or have permission to reuse. Respect YouTube's Terms of Service.</p>
+  </footer>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
