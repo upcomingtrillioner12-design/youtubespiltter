@@ -2,3 +2,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 yt-dlp
 httpx
+yt-dlp-getpot-wpc
