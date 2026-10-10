@@ -1,0 +1,9 @@
+# Put this file at the TOP LEVEL of the GitHub repo (next to the youtube-splitter/ folder).
+services:
+  - type: web
+    name: clipsplitter
+    runtime: docker
+    plan: free
+    dockerfilePath: ./youtube-splitter/Dockerfile
+    dockerContext: ./youtube-splitter
+    healthCheckPath: /api/presets
