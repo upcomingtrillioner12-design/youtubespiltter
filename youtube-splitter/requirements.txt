@@ -1,8 +1,3 @@
-ydl_opts = {
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['tv', 'mweb']  # Bypasses the blocked 'web' client
-        }
-    },
-    # ... any other options you already have
-}
+fastapi>=0.110
+uvicorn[standard]>=0.29
+yt-dlp
