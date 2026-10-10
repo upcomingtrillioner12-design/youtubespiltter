@@ -8,6 +8,24 @@ from fastapi import HTTPException
 
 YOUTUBE_RE = re.compile(r"(youtube\.com/(watch|shorts|embed)|youtu\.be/)")
 
+# FIX 1: Shared yt-dlp extraction args to bypass YouTube's cloud-IP block.
+# The 'web' client is blocked on Render/datacenter IPs; 'tv' and 'mweb' often work.
+YTDLP_EXTRACTOR_ARGS = {
+    "youtube": {
+        "player_client": ["tv", "mweb"],
+    }
+}
+
+# FIX 2: Common yt-dlp flags used in every invocation.
+YTDLP_BASE_FLAGS = [
+    "--no-playlist",
+    "--no-warnings",
+    # Pretend to be a normal browser; helps with some 403s.
+    "--user-agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
 
 def validate_url(url: str) -> str:
     url = (url or "").strip()
@@ -38,12 +56,26 @@ def _run(cmd: list[str], progress_cb=None, line_cb=None) -> None:
 def analyze(url: str) -> dict:
     """Return title, duration, thumbnail, uploader without downloading."""
     url = validate_url(url)
-    proc = subprocess.run(
-        ["yt-dlp", "--dump-single-json", "--no-playlist", url],
-        capture_output=True, text=True, timeout=120,
-    )
+    # FIX 3: Pass extractor_args as JSON so yt-dlp uses the 'tv'/'mweb' client.
+    cmd = [
+        "yt-dlp",
+        "--dump-single-json",
+        "--extractor-args",
+        f"youtube:player_client={','.join(YTDLP_EXTRACTOR_ARGS['youtube']['player_client'])}",
+        *YTDLP_BASE_FLAGS,
+        url,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
-        raise HTTPException(status_code=422, detail=f"Could not read video info: {proc.stderr.strip()[-300:]}")
+        # FIX 4: Give a clearer error message so you know it's a YouTube-side block.
+        err = proc.stderr.strip()[-500:]
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Could not read video info. YouTube is blocking this server's IP. "
+                "Try again, or use a residential proxy. Details: " + err
+            ),
+        )
     info = json.loads(proc.stdout)
     return {
         "id": info.get("id"),
@@ -59,15 +91,18 @@ def download(url: str, out_dir: Path, progress_cb=None) -> Path:
     """Download best mp4 mux into out_dir, return the file path."""
     out_dir.mkdir(parents=True, exist_ok=True)
     template = str(out_dir / "source.%(ext)s")
-    _run([
+    # FIX 5: Add extractor-args and base flags here too, since download also hits YouTube.
+    cmd = [
         "yt-dlp",
         "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "--merge-output-format", "mp4",
-        "--no-playlist",
-        "--no-warnings",
+        "--extractor-args",
+        f"youtube:player_client={','.join(YTDLP_EXTRACTOR_ARGS['youtube']['player_client'])}",
+        *YTDLP_BASE_FLAGS,
         "-o", template,
         url,
-    ], progress_cb=progress_cb)
+    ]
+    _run(cmd, progress_cb=progress_cb)
     vids = sorted(out_dir.glob("source.*"), key=lambda p: p.stat().st_size, reverse=True)
     if not vids:
         raise RuntimeError("Download produced no file.")
@@ -121,5 +156,4 @@ def split(video: Path, out_dir: Path, seconds: int, accurate: bool,
     clips = sorted(clips_dir.glob("clip_*.mp4"))
     if not clips:
         raise RuntimeError("Splitting produced no clips.")
-    # rename to human-friendly: clip_001.mp4 stays; add duration in manifest instead
     return clips
